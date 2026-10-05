@@ -114,11 +114,15 @@ monetizationModel:(id)arg21
 // --- swift ad controllers (neuter init, upstream hooks prevent them from firing) ---
 
 %hook SCSoundCloudAudioAdPlayerEventController
-- (id)init { return %orig; }
+- (id)init {
+    return %orig;
+}
 %end
 
 %hook SCSoundCloudVideoAdPlayerEventController
-- (id)init { return %orig; }
+- (id)init {
+    return %orig;
+}
 %end
 
 // --- PlayQueueItemTrackEntity (swift, v8.60.0 signature) ---
