@@ -52,6 +52,7 @@ For troubleshooting assistance, please see the Issues section of this repository
 - Updated `initWithUrn:` signature for latest SoundCloud binary (`isPrivate:` param added between `shareable:` and `blocked:`)
 - Added `isMonetizableAdGeo` hook (new geo-based monetization check)
 - Added `shouldUpsellGoLite` hook (new Go Lite upsell variant)
+- Suppressed client-side forced-update prompts by returning an empty `dev_ios_update_prompt_versions` feature flag
 - Merged ADsBlocker URL filtering into single tweak — one dylib, one install
 - Forked as SCMusicPlusRevanced
 

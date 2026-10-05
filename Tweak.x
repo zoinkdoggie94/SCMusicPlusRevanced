@@ -201,6 +201,16 @@ playlistStationUrn:(id)arg27
 - (bool)isGoLiteAvailable { return NO; }
 %end
 
+// --- suppress client-side forced update prompts ---
+
+%hook FeatureFlagService
+
++ (NSString *)devIosUpdatePromptVersionsValue {
+    return @"";
+}
+
+%end
+
 // --- init ---
 
 %ctor {
