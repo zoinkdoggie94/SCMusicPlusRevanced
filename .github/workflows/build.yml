@@ -1,8 +1,9 @@
 
 # .github/workflows/build.yml
-# Build automation by Shrubbery / ShrubHub
+# SCMusic / ShrubHub build workflow
+# Credits: Shrubbery / ShrubHub and upstream SCMusicPlusRevanced contributors.
 
-name: Build SoundCloud Tweaked IPA
+name: Build SCMusic IPA
 
 on:
   workflow_dispatch:
@@ -12,36 +13,40 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: scmusic-build-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
-    name: Compile, Inject, Release
     runs-on: macos-15
-    timeout-minutes: 60
-
+    timeout-minutes: 75
     env:
       THEOS: ${{ github.workspace }}/theos
       IPA_URL: https://github.com/zoinkdoggie94/ipa-and-dns-stuff/releases/download/D/com.soundcloud.TouchApp-8.81.0-Decrypted.ipa
-      OUTPUT_IPA: SoundCloud-8.81.0-SCMusicPlusRevanced.ipa
+      APP_NAME: SCMusic
+      BUNDLE_ID: com.scmusic.TouchApp.shrubhub
+      APP_VERSION: 8.81.0
 
     steps:
-      - name: Check out tweak source
+      - name: Checkout tweak source
         uses: actions/checkout@v4
 
-      - name: Set up Theos
+      - name: Checkout Theos
         uses: actions/checkout@v4
         with:
           repository: theos/theos
           path: theos
           submodules: recursive
 
-      - name: Cache patched iOS SDK
+      - name: Cache Theos SDKs
         id: sdk-cache
         uses: actions/cache@v4
         with:
           path: theos/sdks
-          key: theos-sdks-16.5-v1
+          key: theos-sdks-master-scmusic-v1
 
-      - name: Install iOS SDK
+      - name: Download iOS SDKs
         if: steps.sdk-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
@@ -51,73 +56,54 @@ jobs:
             -o /tmp/theos-sdks.zip
           unzip -q /tmp/theos-sdks.zip -d /tmp
           mkdir -p "$THEOS/sdks"
-          cp -a /tmp/sdks-master/iPhoneOS16.5.sdk "$THEOS/sdks/"
-          test -d "$THEOS/sdks/iPhoneOS16.5.sdk"
+          cp -a /tmp/sdks-master/*.sdk "$THEOS/sdks/"
+          test -n "$(find "$THEOS/sdks" -maxdepth 1 -name '*.sdk' -print -quit)"
 
-      - name: Install build dependencies
+      - name: Install build tools
         shell: bash
         run: |
           set -euo pipefail
           brew install ldid make
 
-      - name: Build SCMusicPlusRevanced dylib
+      - name: Compile conservative tweak
         shell: bash
         run: |
           set -euo pipefail
           export PATH="$(brew --prefix make)/libexec/gnubin:$PATH"
-
           make clean
           make FINALPACKAGE=1
-
-          test -s .theos/obj/SCMusicPlusRevanced.dylib
-
           mkdir -p release
-
-          cp \
-            .theos/obj/SCMusicPlusRevanced.dylib \
+          test -s .theos/obj/SCMusicPlusRevanced.dylib
+          cp .theos/obj/SCMusicPlusRevanced.dylib \
             release/SCMusicPlusRevanced.dylib
+          echo 'Compiled dylib dependencies:'
+          otool -L release/SCMusicPlusRevanced.dylib
 
-      - name: Download SoundCloud 8.81.0 IPA
+      - name: Download decrypted SoundCloud IPA
         shell: bash
         run: |
           set -euo pipefail
-
-          curl -fL \
-            --retry 3 \
-            --connect-timeout 30 \
-            --max-time 1800 \
-            "$IPA_URL" \
-            -o base.ipa
-
-          test -s base.ipa
-          unzip -tqq base.ipa
-
+          curl -fL --retry 3 --connect-timeout 30 \
+            --max-time 1800 "$IPA_URL" -o original.ipa
+          test -s original.ipa
+          unzip -tqq original.ipa
           python3 - <<'PY'
           import plistlib
           import zipfile
-
-          with zipfile.ZipFile('base.ipa') as ipa:
-              matches = [
-                  n for n in ipa.namelist()
-                  if n.startswith('Payload/')
-                  and n.endswith('.app/Info.plist')
-                  and n.count('/') == 2
+          with zipfile.ZipFile('original.ipa') as ipa:
+              infos = [
+                  name for name in ipa.namelist()
+                  if name.startswith('Payload/')
+                  and name.endswith('.app/Info.plist')
+                  and name.count('/') == 2
               ]
-
-              if len(matches) != 1:
-                  raise SystemExit(
-                      'Expected exactly one app inside the IPA'
-                  )
-
-              info = plistlib.loads(ipa.read(matches[0]))
-              actual = info.get('CFBundleIdentifier')
-
-              if actual != 'com.soundcloud.TouchApp':
-                  raise SystemExit(
-                      f'Wrong IPA bundle identifier: {actual}'
-                  )
-
-              print('Verified SoundCloud IPA:', actual)
+              if len(infos) != 1:
+                  raise SystemExit('Expected exactly one primary app')
+              info = plistlib.loads(ipa.read(infos[0]))
+              if info.get('CFBundleIdentifier') != 'com.soundcloud.TouchApp':
+                  raise SystemExit('The downloaded IPA is not SoundCloud')
+              print('Original app:', info.get('CFBundleIdentifier'))
+              print('Original version:', info.get('CFBundleShortVersionString'))
           PY
 
       - name: Set up Python
@@ -125,154 +111,121 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install cyan IPA injector
+      - name: Install cyan injector
         shell: bash
         run: |
           set -euo pipefail
-
           python -m pip install --no-cache-dir \
             https://github.com/asdfzxcvbn/pyzule-rw/archive/refs/heads/main.zip
-
           cyan --version
 
-      - name: Inject SCMusicPlusRevanced
+      # Same name and bundle ID, but no dylib, for crash diagnosis.
+      - name: Build renamed no-tweak control IPA
         shell: bash
         run: |
           set -euo pipefail
-
-          cyan \
-            -i base.ipa \
-            -f release/SCMusicPlusRevanced.dylib \
-            -o "release/$OUTPUT_IPA" \
+          cyan -i original.ipa \
+            -o release/SCMusic-8.81.0-NoTweak-TEST.ipa \
+            -n "$APP_NAME" \
+            -b "$BUNDLE_ID" \
             --overwrite
 
-          test -s "release/$OUTPUT_IPA"
-
-      - name: Verify injected IPA
+      - name: Build renamed injected IPA
         shell: bash
         run: |
           set -euo pipefail
+          cyan -i original.ipa \
+            -o release/SCMusic-8.81.0-Injected.ipa \
+            -f release/SCMusicPlusRevanced.dylib \
+            -n "$APP_NAME" \
+            -b "$BUNDLE_ID" \
+            --overwrite
 
+      - name: Verify output IPAs
+        shell: bash
+        run: |
+          set -euo pipefail
           python3 - <<'PY'
-          import os
           import plistlib
           import zipfile
-
-          path = os.path.join(
-              'release',
-              os.environ['OUTPUT_IPA']
-          )
-
-          with zipfile.ZipFile(path) as ipa:
-              bad_file = ipa.testzip()
-
-              if bad_file:
-                  raise SystemExit(
-                      f'Corrupt archive entry: {bad_file}'
-                  )
-
-              files = set(ipa.namelist())
-
-              infos = [
-                  n for n in files
-                  if n.startswith('Payload/')
-                  and n.endswith('.app/Info.plist')
-                  and n.count('/') == 2
-              ]
-
-              if len(infos) != 1:
-                  raise SystemExit(
-                      'IPA has an invalid app structure'
-                  )
-
-              app_dir = infos[0].rsplit('/', 1)[0]
-
-              expected = (
-                  f'{app_dir}/Frameworks/'
-                  'SCMusicPlusRevanced.dylib'
-              )
-
-              if expected not in files:
-                  raise SystemExit(
-                      'Injected dylib missing from Frameworks'
-                  )
-
-              info = plistlib.loads(ipa.read(infos[0]))
-              executable = info.get('CFBundleExecutable')
-
-              if not executable:
-                  raise SystemExit(
-                      'App executable not declared'
-                  )
-
-              executable_path = f'{app_dir}/{executable}'
-
-              if executable_path not in files:
-                  raise SystemExit(
-                      'App executable missing'
-                  )
-
-              binary = ipa.read(executable_path)
-
-              if b'SCMusicPlusRevanced.dylib' not in binary:
-                  raise SystemExit(
-                      'Executable does not reference injected dylib'
-                  )
-
-              print(
-                  'Injected IPA structure and load reference verified'
-              )
+          import os
+          expected_id = os.environ['BUNDLE_ID']
+          for filename, injected in (
+              ('release/SCMusic-8.81.0-NoTweak-TEST.ipa', False),
+              ('release/SCMusic-8.81.0-Injected.ipa', True),
+          ):
+              with zipfile.ZipFile(filename) as ipa:
+                  if ipa.testzip() is not None:
+                      raise SystemExit(f'ZIP corruption: {filename}')
+                  names = set(ipa.namelist())
+                  infos = [
+                      name for name in names
+                      if name.startswith('Payload/')
+                      and name.endswith('.app/Info.plist')
+                      and name.count('/') == 2
+                  ]
+                  if len(infos) != 1:
+                      raise SystemExit(f'Invalid app layout: {filename}')
+                  info = plistlib.loads(ipa.read(infos[0]))
+                  if info.get('CFBundleIdentifier') != expected_id:
+                      raise SystemExit(f'Wrong bundle ID: {filename}')
+                  if info.get('CFBundleDisplayName', info.get('CFBundleName')) != 'SCMusic':
+                      raise SystemExit(f'Wrong app name: {filename}')
+                  app_path = infos[0].rsplit('/', 1)[0]
+                  dylib = f'{app_path}/Frameworks/SCMusicPlusRevanced.dylib'
+                  if injected:
+                      if dylib not in names:
+                          raise SystemExit('Cyan did not embed the dylib')
+                      executable = info.get('CFBundleExecutable')
+                      executable_path = f'{app_path}/{executable}'
+                      if executable_path not in names:
+                          raise SystemExit('App executable missing')
+                      binary = ipa.read(executable_path)
+                      if b'SCMusicPlusRevanced.dylib' not in binary:
+                          raise SystemExit('App executable does not load the dylib')
+                  elif dylib in names:
+                      raise SystemExit('Control IPA contains the tweak')
+                  print('Verified:', filename)
           PY
 
-      - name: Publish GitHub Release
+      - name: Upload no-tweak test IPA to Actions artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SCMusic-NoTweak-Test
+          path: release/SCMusic-8.81.0-NoTweak-TEST.ipa
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}
-          name: SoundCloud 8.81.0 + SCMusicPlusRevanced (Build ${{ github.run_number }})
-
+          tag_name: scmusic-8.81.0-build-${{ github.run_number }}
+          name: SCMusic 8.81.0 (Build ${{ github.run_number }})
           body: |
-            ## SoundCloud 8.81.0 + SCMusicPlusRevanced
+            # SCMusic 8.81.0 — ShrubHub
 
-            SoundCloud 8.81.0 with the SCMusicPlusRevanced tweak injected.
+            **App name:** SCMusic
+            **Bundle ID:** `com.scmusic.TouchApp.shrubhub`
+            **Base:** SoundCloud 8.81.0
+            **Tweak:** SCMusicPlusRevanced (conservative compatibility hooks)
 
-            ### Downloads
+            `SCMusic-8.81.0-Injected.ipa` contains the injected tweak.
+            `SCMusicPlusRevanced.dylib` contains the standalone tweak.
 
-            **SoundCloud-8.81.0-SCMusicPlusRevanced.ipa**
-            - Modified IPA containing the injected dylib.
-            - Requires signing before normal installation.
+            You must sign the IPA using your own certificate (for example, with ShrubSign).
 
-            **SCMusicPlusRevanced.dylib**
-            - Standalone compiled tweak.
+            The SoundCloud 8.81.0 base app may itself crash when sideloaded.
+            To isolate the problem, download the no-tweak TEST IPA from the
+            GitHub Actions artifacts for this workflow run and sign it the same way.
+            If that IPA crashes too, changing the dylib injection won't fix it.
 
-            ### Installation
+            Compatibility note: the conservative tweak intentionally omits
+            version-specific initializer hooks until SoundCloud 8.81.0 is verified.
 
-            Sign the IPA with your own certificate using an
-            IPA signer such as ShrubSign.
-
-            ### Build information
-
-            - SoundCloud version: 8.81.0
-            - Injection tool: cyan
-            - Tweak build system: Theos
-            - Architecture: arm64
-            - Build number: ${{ github.run_number }}
-            - Commit: ${{ github.sha }}
-
-            ### Credits
-
-            Build automation: Shrubbery / ShrubHub.
-
-            Original tweak: SCMusicPlusRevanced contributors.
-
-            ### Notes
-
-            Injection does not guarantee runtime compatibility.
-            SoundCloud login or launch issues may occur.
-
-            Only redistribute application binaries with permission.
-
+            **Build automation:** Shrubbery / ShrubHub.
+            **Original tweak:** SCMusicPlusRevanced contributors.
+            Redistribute only when you have permission to share the base application.
           files: |
-            release/SoundCloud-8.81.0-SCMusicPlusRevanced.ipa
+            release/SCMusic-8.81.0-Injected.ipa
             release/SCMusicPlusRevanced.dylib
-
           fail_on_unmatched_files: true
